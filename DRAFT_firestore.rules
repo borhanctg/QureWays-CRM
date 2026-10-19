@@ -1,0 +1,725 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 1: Global Safety Net (Default-Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Primitive Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isAdmin() {
+      return isVerifiedUser() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        request.auth.token.email == 'borhanctg@gmail.com'
+      );
+    }
+
+    function isOptStr(data, key, maxLen) {
+      return !(key in data) || (data[key] is string && data[key].size() <= maxLen);
+    }
+
+    function isOptNum(data, key) {
+      return !(key in data) || (data[key] is int || data[key] is float);
+    }
+
+    function isOptBool(data, key) {
+      return !(key in data) || (data[key] is bool);
+    }
+
+    // 1. UserProfile Validation
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'active', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'displayName', 'role', 'department', 'phone', 'active', 'createdAt', 'updatedAt']) &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 256 &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
+        data.role is string && data.role in [
+          'CRM Administrator',
+          'Patient Relationship Manager',
+          'Medical Report Coordinator',
+          'Hospital Coordination Officer',
+          'Travel and Visa Coordinator',
+          'Authorized Management Staff',
+          'Patient'
+        ] &&
+        isOptStr(data, 'department', 100) &&
+        isOptStr(data, 'phone', 40) &&
+        data.active is bool &&
+        data.createdAt is string && data.createdAt.size() <= 50 &&
+        data.updatedAt is string && data.updatedAt.size() <= 50;
+    }
+
+    match /users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
+      allow list: if isSignedIn() && (resource.data.uid == request.auth.uid || isAdmin());
+      allow create: if isVerifiedUser() && isValidId(userId) && request.auth.uid == userId &&
+        isValidUserProfile(incoming()) &&
+        incoming().uid == request.auth.uid &&
+        (incoming().role != 'CRM Administrator' || isAdmin());
+      allow update: if isVerifiedUser() && isValidId(userId) && isValidUserProfile(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt && (
+          isAdmin() ||
+          (request.auth.uid == userId &&
+           incoming().role == existing().role &&
+           incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'department', 'phone', 'updatedAt']))
+        );
+      allow delete: if isAdmin() && isValidId(userId);
+    }
+
+    // 2. AdminRecord Validation
+    function isValidAdminRecord(data) {
+      return data.keys().hasAll(['uid', 'email', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'createdAt']) &&
+        data.uid is string && data.uid.size() <= 128 &&
+        data.email is string && data.email.size() <= 256 &&
+        data.createdAt is string && data.createdAt.size() <= 50;
+    }
+
+    match /admins/{adminId} {
+      allow get: if isSignedIn() && isValidId(adminId) && (request.auth.uid == adminId || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isAdmin() && isValidId(adminId) && isValidAdminRecord(incoming());
+      allow update: if isAdmin() && isValidId(adminId) && isValidAdminRecord(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt;
+      allow delete: if isAdmin() && isValidId(adminId);
+    }
+
+    // 3. Lead Validation
+    function isValidLead(data) {
+      return data.keys().hasAll([
+          'leadCode', 'patientName', 'phone', 'country', 'city', 'preferredLanguage',
+          'inquiryDate', 'leadSource', 'interestedTreatment', 'preferredHospital',
+          'assignedStaffName', 'priority', 'status', 'consentGiven', 'ownerId', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'leadCode', 'patientName', 'phone', 'whatsapp', 'email', 'country', 'city',
+          'preferredLanguage', 'inquiryDate', 'leadSource', 'campaignSource',
+          'interestedTreatment', 'preferredHospital', 'preferredCountry', 'needsDescription',
+          'assignedStaffName', 'priority', 'nextFollowUpDate', 'status', 'lostReason',
+          'consentGiven', 'privacyPreferences', 'convertedPatientId', 'internalNotes',
+          'ownerId', 'createdAt', 'updatedAt'
+        ]) &&
+        data.leadCode is string && data.leadCode.size() <= 40 &&
+        data.patientName is string && data.patientName.size() >= 1 && data.patientName.size() <= 140 &&
+        data.phone is string && data.phone.size() <= 40 &&
+        isOptStr(data, 'whatsapp', 40) &&
+        isOptStr(data, 'email', 200) &&
+        data.country is string && data.country.size() <= 80 &&
+        data.city is string && data.city.size() <= 80 &&
+        data.preferredLanguage is string && data.preferredLanguage.size() <= 50 &&
+        data.inquiryDate is string && data.inquiryDate.size() <= 40 &&
+        data.leadSource is string && data.leadSource.size() <= 80 &&
+        isOptStr(data, 'campaignSource', 120) &&
+        data.interestedTreatment is string && data.interestedTreatment.size() <= 160 &&
+        data.preferredHospital is string && data.preferredHospital.size() <= 160 &&
+        isOptStr(data, 'preferredCountry', 80) &&
+        isOptStr(data, 'needsDescription', 2000) &&
+        data.assignedStaffName is string && data.assignedStaffName.size() <= 120 &&
+        data.priority is string && data.priority in ['Urgent', 'High', 'Medium', 'Low'] &&
+        isOptStr(data, 'nextFollowUpDate', 40) &&
+        data.status is string && data.status.size() <= 80 &&
+        isOptStr(data, 'lostReason', 400) &&
+        data.consentGiven is bool &&
+        isOptStr(data, 'privacyPreferences', 300) &&
+        isOptStr(data, 'convertedPatientId', 128) &&
+        isOptStr(data, 'internalNotes', 2000) &&
+        data.ownerId is string && data.ownerId.size() <= 128 &&
+        data.createdAt is string && data.createdAt.size() <= 50 &&
+        data.updatedAt is string && data.updatedAt.size() <= 50;
+    }
+
+    match /leads/{leadId} {
+      allow get: if isSignedIn() && isValidId(leadId) && (resource.data.ownerId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+      allow create: if isVerifiedUser() && isValidId(leadId) && isValidLead(incoming()) &&
+        incoming().ownerId == request.auth.uid;
+      allow update: if isVerifiedUser() && isValidId(leadId) && isValidLead(incoming()) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt && (
+          isAdmin() ||
+          (existing().ownerId == request.auth.uid &&
+           incoming().diff(existing()).affectedKeys().hasOnly([
+             'patientName', 'phone', 'whatsapp', 'email', 'country', 'city',
+             'preferredLanguage', 'leadSource', 'campaignSource', 'interestedTreatment',
+             'preferredHospital', 'preferredCountry', 'needsDescription', 'assignedStaffName',
+             'priority', 'nextFollowUpDate', 'status', 'lostReason', 'consentGiven',
+             'privacyPreferences', 'convertedPatientId', 'internalNotes', 'updatedAt'
+           ]))
+        );
+      allow delete: if isVerifiedUser() && isValidId(leadId) && (resource.data.ownerId == request.auth.uid || isAdmin());
+    }
+
+    // 4. Patient Validation
+    function isValidPatient(data) {
+      return data.keys().hasAll([
+          'patientCode', 'fullName', 'age', 'gender', 'phone', 'country', 'city',
+          'preferredLanguage', 'preferredHospital', 'preferredDestination',
+          'assignedCoordinatorName', 'journeyStage', 'dataProcessingConsent',
+          'marketingConsent', 'ownerId', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'patientCode', 'fullName', 'age', 'gender', 'phone', 'whatsapp', 'email',
+          'country', 'city', 'passportNumber', 'preferredLanguage', 'preferredChannel',
+          'emergencyContact', 'medicalHistorySummary', 'existingDiagnoses',
+          'reportedSymptoms', 'previousTreatments', 'treatmentRequirements',
+          'preferredHospital', 'preferredDestination', 'assignedCoordinatorName',
+          'journeyStage', 'dataProcessingConsent', 'marketingConsent',
+          'ownerId', 'createdAt', 'updatedAt'
+        ]) &&
+        data.patientCode is string && data.patientCode.size() <= 40 &&
+        data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 140 &&
+        (data.age is int || data.age is float) &&
+        data.gender is string && data.gender.size() <= 30 &&
+        data.phone is string && data.phone.size() <= 40 &&
+        isOptStr(data, 'whatsapp', 40) &&
+        isOptStr(data, 'email', 200) &&
+        data.country is string && data.country.size() <= 80 &&
+        data.city is string && data.city.size() <= 80 &&
+        isOptStr(data, 'passportNumber', 50) &&
+        data.preferredLanguage is string && data.preferredLanguage.size() <= 50 &&
+        isOptStr(data, 'preferredChannel', 50) &&
+        isOptStr(data, 'emergencyContact', 200) &&
+        isOptStr(data, 'medicalHistorySummary', 3000) &&
+        isOptStr(data, 'existingDiagnoses', 1500) &&
+        isOptStr(data, 'reportedSymptoms', 1500) &&
+        isOptStr(data, 'previousTreatments', 1500) &&
+        isOptStr(data, 'treatmentRequirements', 1500) &&
+        data.preferredHospital is string && data.preferredHospital.size() <= 160 &&
+        data.preferredDestination is string && data.preferredDestination.size() <= 120 &&
+        data.assignedCoordinatorName is string && data.assignedCoordinatorName.size() <= 120 &&
+        data.journeyStage is string && data.journeyStage.size() <= 80 &&
+        data.dataProcessingConsent is bool &&
+        data.marketingConsent is bool &&
+        data.ownerId is string && data.ownerId.size() <= 128 &&
+        data.createdAt is string && data.createdAt.size() <= 50 &&
+        data.updatedAt is string && data.updatedAt.size() <= 50;
+    }
+
+    match /patients/{patientId} {
+      allow get: if isSignedIn() && isValidId(patientId) && (resource.data.ownerId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+      allow create: if isVerifiedUser() && isValidId(patientId) && isValidPatient(incoming()) &&
+        incoming().ownerId == request.auth.uid;
+      allow update: if isVerifiedUser() && isValidId(patientId) && isValidPatient(incoming()) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt && (
+          isAdmin() ||
+          (existing().ownerId == request.auth.uid &&
+           incoming().diff(existing()).affectedKeys().hasOnly([
+             'fullName', 'age', 'gender', 'phone', 'whatsapp', 'email', 'country', 'city',
+             'passportNumber', 'preferredLanguage', 'preferredChannel', 'emergencyContact',
+             'medicalHistorySummary', 'existingDiagnoses', 'reportedSymptoms',
+             'previousTreatments', 'treatmentRequirements', 'preferredHospital',
+             'preferredDestination', 'assignedCoordinatorName', 'journeyStage',
+             'dataProcessingConsent', 'marketingConsent', 'updatedAt'
+           ]))
+        );
+      allow delete: if isAdmin() && isValidId(patientId);
+    }
+
+    // 5. MedicalDocument Validation
+    function isValidMedicalDocument(data) {
+      return data.keys().hasAll([
+          'patientId', 'patientName', 'title', 'category', 'fileName', 'fileType',
+          'fileSizeKb', 'version', 'extractedText', 'reviewStatus', 'uploadedByName',
+          'ownerId', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'patientId', 'patientName', 'title', 'category', 'fileName', 'fileType',
+          'fileSizeKb', 'version', 'extractedText', 'reviewStatus', 'reviewerNotes',
+          'uploadedByName', 'retentionPolicy', 'ownerId', 'createdAt', 'updatedAt'
+        ]) &&
+        data.patientId is string && data.patientId.size() <= 128 &&
+        data.patientName is string && data.patientName.size() <= 140 &&
+        data.title is string && data.title.size() <= 200 &&
+        data.category is string && data.category.size() <= 80 &&
+        data.fileName is string && data.fileName.size() <= 200 &&
+        data.fileType is string && data.fileType.size() <= 40 &&
+        (data.fileSizeKb is int || data.fileSizeKb is float) &&
+        (data.version is int || data.version is float) &&
+        data.extractedText is string && data.extractedText.size() <= 5000 &&
+        data.reviewStatus is string && data.reviewStatus.size() <= 60 &&
+        isOptStr(data, 'reviewerNotes', 1000) &&
+        data.uploadedByName is string && data.uploadedByName.size() <= 120 &&
+        isOptStr(data, 'retentionPolicy', 100) &&
+        data.ownerId is string && data.ownerId.size() <= 128 &&
+        data.createdAt is string && data.createdAt.size() <= 50 &&
+        data.updatedAt is string && data.updatedAt.size() <= 50;
+    }
+
+    match /medicalDocuments/{docId} {
+      allow get: if isSignedIn() && isValidId(docId) && (resource.data.ownerId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+      allow create: if isVerifiedUser() && isValidId(docId) && isValidMedicalDocument(incoming()) &&
+        incoming().ownerId == request.auth.uid;
+      allow update: if isVerifiedUser() && isValidId(docId) && isValidMedicalDocument(incoming()) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt && (
+          isAdmin() ||
+          (existing().ownerId == request.auth.uid &&
+           incoming().diff(existing()).affectedKeys().hasOnly([
+             'title', 'category', 'version', 'extractedText', 'reviewStatus',
+             'reviewerNotes', 'retentionPolicy', 'updatedAt'
+           ]))
+        );
+      allow delete: if isVerifiedUser() && isValidId(docId) && (resource.data.ownerId == request.auth.uid || isAdmin());
+    }
+
+    // 6. AiMedicalReport Validation
+    function isValidAiMedicalReport(data) {
+      return data.keys().hasAll([
+          'patientId', 'patientName', 'preferredHospital', 'sourceDocumentsSummary',
+          'documentedHistorySummary', 'reportedSymptomsAndFindings', 'currentDocumentedStatus',
+          'missingInformation', 'questionsForDoctor', 'recommendedSpecialty',
+          'potentialTreatmentPathways', 'suggestedNextSteps', 'disclaimer',
+          'reviewStatus', 'modelVersion', 'sharedWithPatient', 'ownerId', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'patientId', 'patientName', 'age', 'gender', 'preferredHospital', 'preferredDestination',
+          'currencyPreference', 'sourceDocumentsSummary', 'documentedHistorySummary',
+          'reportedSymptomsAndFindings', 'currentDocumentedStatus', 'missingInformation',
+          'questionsForDoctor', 'recommendedSpecialty', 'secondOpinionWorkflow',
+          'potentialTreatmentPathways', 'suggestedNextSteps', 'estimatedBudgetRange',
+          'travelConsiderations', 'emergencyWarningDetected', 'emergencyWarningText',
+          'disclaimer', 'reviewStatus', 'modelVersion', 'reviewerName', 'reviewNotes',
+          'sharedWithPatient', 'ownerId', 'createdAt', 'updatedAt'
+        ]) &&
+        data.patientId is string && data.patientId.size() <= 128 &&
+        data.patientName is string && data.patientName.size() <= 140 &&
+        isOptNum(data, 'age') &&
+        isOptStr(data, 'gender', 30) &&
+        data.preferredHospital is string && data.preferredHospital.size() <= 160 &&
+        isOptStr(data, 'preferredDestination', 120) &&
+        isOptStr(data, 'currencyPreference', 20) &&
+        data.sourceDocumentsSummary is string && data.sourceDocumentsSummary.size() <= 1000 &&
+        data.documentedHistorySummary is string && data.documentedHistorySummary.size() <= 3000 &&
+        data.reportedSymptomsAndFindings is string && data.reportedSymptomsAndFindings.size() <= 3000 &&
+        data.currentDocumentedStatus is string && data.currentDocumentedStatus.size() <= 2000 &&
+        data.missingInformation is string && data.missingInformation.size() <= 2000 &&
+        data.questionsForDoctor is string && data.questionsForDoctor.size() <= 2000 &&
+        data.recommendedSpecialty is string && data.recommendedSpecialty.size() <= 300 &&
+        isOptStr(data, 'secondOpinionWorkflow', 1500) &&
+        data.potentialTreatmentPathways is string && data.potentialTreatmentPathways.size() <= 2500 &&
+        data.suggestedNextSteps is string && data.suggestedNextSteps.size() <= 1500 &&
+        isOptStr(data, 'estimatedBudgetRange', 1000) &&
+        isOptStr(data, 'travelConsiderations', 1500) &&
+        isOptBool(data, 'emergencyWarningDetected') &&
+        isOptStr(data, 'emergencyWarningText', 1000) &&
+        data.disclaimer is string && data.disclaimer.size() <= 1500 &&
+        data.reviewStatus is string && data.reviewStatus.size() <= 80 &&
+        data.modelVersion is string && data.modelVersion.size() <= 80 &&
+        isOptStr(data, 'reviewerName', 120) &&
+        isOptStr(data, 'reviewNotes', 1500) &&
+        data.sharedWithPatient is bool &&
+        data.ownerId is string && data.ownerId.size() <= 128 &&
+        data.createdAt is string && data.createdAt.size() <= 50 &&
+        data.updatedAt is string && data.updatedAt.size() <= 50;
+    }
+
+    match /aiReports/{reportId} {
+      allow get: if isSignedIn() && isValidId(reportId) && (resource.data.ownerId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+      allow create: if isVerifiedUser() && isValidId(reportId) && isValidAiMedicalReport(incoming()) &&
+        incoming().ownerId == request.auth.uid;
+      allow update: if isVerifiedUser() && isValidId(reportId) && isValidAiMedicalReport(incoming()) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt && (
+          isAdmin() ||
+          (existing().ownerId == request.auth.uid &&
+           incoming().diff(existing()).affectedKeys().hasOnly([
+             'documentedHistorySummary', 'reportedSymptomsAndFindings', 'currentDocumentedStatus',
+             'missingInformation', 'questionsForDoctor', 'recommendedSpecialty',
+             'secondOpinionWorkflow', 'potentialTreatmentPathways', 'suggestedNextSteps',
+             'estimatedBudgetRange', 'travelConsiderations', 'reviewStatus',
+             'reviewerName', 'reviewNotes', 'sharedWithPatient', 'updatedAt'
+           ]))
+        );
+      allow delete: if isAdmin() && isValidId(reportId);
+    }
+
+    // 7. HospitalSecondOpinion Validation
+    function isValidHospitalSecondOpinion(data) {
+      return data.keys().hasAll([
+          'patientId', 'patientName', 'specialty', 'hospitalName', 'department',
+          'doctorName', 'submissionDate', 'hospitalReferenceNumber',
+          'assignedCoordinatorName', 'status', 'verificationStatus',
+          'ownerId', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'patientId', 'patientName', 'specialty', 'hospitalName', 'department',
+          'doctorName', 'submittedDocuments', 'submissionDate', 'hospitalReferenceNumber',
+          'assignedCoordinatorName', 'followUpDate', 'status', 'quotedFeeUsd',
+          'expectedResponseDate', 'receivedOpinionSummary', 'documentedRecommendations',
+          'originalDocumentTitle', 'issuingInstitution', 'documentIssuedDate',
+          'verificationStatus', 'estimatedCostInr', 'estimatedCostUsd',
+          'estimatedTimeline', 'clinicianDiscussionPoints', 'ownerId', 'createdAt', 'updatedAt'
+        ]) &&
+        data.patientId is string && data.patientId.size() <= 128 &&
+        data.patientName is string && data.patientName.size() <= 140 &&
+        data.specialty is string && data.specialty.size() <= 120 &&
+        data.hospitalName is string && data.hospitalName.size() <= 160 &&
+        data.department is string && data.department.size() <= 120 &&
+        data.doctorName is string && data.doctorName.size() <= 140 &&
+        isOptStr(data, 'submittedDocuments', 1000) &&
+        data.submissionDate is string && data.submissionDate.size() <= 40 &&
+        data.hospitalReferenceNumber is string && data.hospitalReferenceNumber.size() <= 80 &&
+        data.assignedCoordinatorName is string && data.assignedCoordinatorName.size() <= 120 &&
+        isOptStr(data, 'followUpDate', 40) &&
+        data.status is string && data.status.size() <= 80 &&
+        isOptNum(data, 'quotedFeeUsd') &&
+        isOptStr(data, 'expectedResponseDate', 40) &&
+        isOptStr(data, 'receivedOpinionSummary', 3000) &&
+        isOptStr(data, 'documentedRecommendations', 3000) &&
+        isOptStr(data, 'originalDocumentTitle', 200) &&
+        isOptStr(data, 'issuingInstitution', 160) &&
+        isOptStr(data, 'documentIssuedDate', 40) &&
+        data.verificationStatus is string && data.verificationStatus.size() <= 80 &&
+        isOptNum(data, 'estimatedCostInr') &&
+        isOptNum(data, 'estimatedCostUsd') &&
+        isOptStr(data, 'estimatedTimeline', 200) &&
+        isOptStr(data, 'clinicianDiscussionPoints', 1500) &&
+        data.ownerId is string && data.ownerId.size() <= 128 &&
+        data.createdAt is string && data.createdAt.size() <= 50 &&
+        data.updatedAt is string && data.updatedAt.size() <= 50;
+    }
+
+    match /secondOpinions/{opinionId} {
+      allow get: if isSignedIn() && isValidId(opinionId) && (resource.data.ownerId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+      allow create: if isVerifiedUser() && isValidId(opinionId) && isValidHospitalSecondOpinion(incoming()) &&
+        incoming().ownerId == request.auth.uid;
+      allow update: if isVerifiedUser() && isValidId(opinionId) && isValidHospitalSecondOpinion(incoming()) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt && (
+          isAdmin() ||
+          (existing().ownerId == request.auth.uid &&
+           incoming().diff(existing()).affectedKeys().hasOnly([
+             'status', 'followUpDate', 'quotedFeeUsd', 'expectedResponseDate',
+             'receivedOpinionSummary', 'documentedRecommendations', 'originalDocumentTitle',
+             'issuingInstitution', 'documentIssuedDate', 'verificationStatus',
+             'estimatedCostInr', 'estimatedCostUsd', 'estimatedTimeline',
+             'clinicianDiscussionPoints', 'updatedAt'
+           ]))
+        );
+      allow delete: if isAdmin() && isValidId(opinionId);
+    }
+
+    // 8. TreatmentCostEstimate Validation
+    function isValidTreatmentCostEstimate(data) {
+      return data.keys().hasAll([
+          'patientId', 'patientName', 'destinationCity', 'hospitalName', 'specialty',
+          'treatmentTitle', 'patientCount', 'companionCount', 'lengthOfStayDays',
+          'currency', 'minTotalBudgetUsd', 'maxTotalBudgetUsd', 'quotationSource',
+          'status', 'ownerId', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'patientId', 'patientName', 'destinationCity', 'hospitalName', 'specialty',
+          'treatmentTitle', 'patientCount', 'companionCount', 'lengthOfStayDays',
+          'accommodationCategory', 'currency', 'exchangeRateBdtPerUsd',
+          'exchangeRateInrPerUsd', 'exchangeRateTimestamp', 'exchangeRateSource',
+          'hospitalConfirmedTotalUsd', 'estimatedTravelTotalUsd',
+          'estimatedAccommodationTotalUsd', 'coordinationAndOtherTotalUsd',
+          'minTotalBudgetUsd', 'maxTotalBudgetUsd', 'lineItemsSummary',
+          'assumptions', 'exclusions', 'validityPeriodDays', 'quotationSource',
+          'status', 'ownerId', 'createdAt', 'updatedAt'
+        ]) &&
+        data.patientId is string && data.patientId.size() <= 128 &&
+        data.patientName is string && data.patientName.size() <= 140 &&
+        data.destinationCity is string && data.destinationCity.size() <= 100 &&
+        data.hospitalName is string && data.hospitalName.size() <= 160 &&
+        data.specialty is string && data.specialty.size() <= 120 &&
+        data.treatmentTitle is string && data.treatmentTitle.size() <= 200 &&
+        (data.patientCount is int || data.patientCount is float) &&
+        (data.companionCount is int || data.companionCount is float) &&
+        (data.lengthOfStayDays is int || data.lengthOfStayDays is float) &&
+        isOptStr(data, 'accommodationCategory', 80) &&
+        data.currency is string && data.currency.size() <= 10 &&
+        isOptNum(data, 'exchangeRateBdtPerUsd') &&
+        isOptNum(data, 'exchangeRateInrPerUsd') &&
+        isOptStr(data, 'exchangeRateTimestamp', 60) &&
+        isOptStr(data, 'exchangeRateSource', 120) &&
+        isOptNum(data, 'hospitalConfirmedTotalUsd') &&
+        isOptNum(data, 'estimatedTravelTotalUsd') &&
+        isOptNum(data, 'estimatedAccommodationTotalUsd') &&
+        isOptNum(data, 'coordinationAndOtherTotalUsd') &&
+        (data.minTotalBudgetUsd is int || data.minTotalBudgetUsd is float) &&
+        (data.maxTotalBudgetUsd is int || data.maxTotalBudgetUsd is float) &&
+        isOptStr(data, 'lineItemsSummary', 4000) &&
+        isOptStr(data, 'assumptions', 1500) &&
+        isOptStr(data, 'exclusions', 1500) &&
+        isOptNum(data, 'validityPeriodDays') &&
+        data.quotationSource is string && data.quotationSource.size() <= 160 &&
+        data.status is string && data.status.size() <= 60 &&
+        data.ownerId is string && data.ownerId.size() <= 128 &&
+        data.createdAt is string && data.createdAt.size() <= 50 &&
+        data.updatedAt is string && data.updatedAt.size() <= 50;
+    }
+
+    match /costEstimates/{estimateId} {
+      allow get: if isSignedIn() && isValidId(estimateId) && (resource.data.ownerId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+      allow create: if isVerifiedUser() && isValidId(estimateId) && isValidTreatmentCostEstimate(incoming()) &&
+        incoming().ownerId == request.auth.uid;
+      allow update: if isVerifiedUser() && isValidId(estimateId) && isValidTreatmentCostEstimate(incoming()) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt && (
+          isAdmin() ||
+          (existing().ownerId == request.auth.uid &&
+           incoming().diff(existing()).affectedKeys().hasOnly([
+             'treatmentTitle', 'patientCount', 'companionCount', 'lengthOfStayDays',
+             'accommodationCategory', 'currency', 'hospitalConfirmedTotalUsd',
+             'estimatedTravelTotalUsd', 'estimatedAccommodationTotalUsd',
+             'coordinationAndOtherTotalUsd', 'minTotalBudgetUsd', 'maxTotalBudgetUsd',
+             'lineItemsSummary', 'assumptions', 'exclusions', 'status', 'updatedAt'
+           ]))
+        );
+      allow delete: if isAdmin() && isValidId(estimateId);
+    }
+
+    // 9. ServiceBooking Validation
+    function isValidServiceBooking(data) {
+      return data.keys().hasAll([
+          'patientId', 'patientName', 'serviceCategory', 'serviceName',
+          'hospitalOrProvider', 'scheduledDate', 'status',
+          'assignedCoordinatorName', 'ownerId', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'patientId', 'patientName', 'serviceCategory', 'serviceName',
+          'hospitalOrProvider', 'doctorName', 'scheduledDate', 'scheduledTime',
+          'serviceFeeUsd', 'processingTimeEstimate', 'status',
+          'assignedCoordinatorName', 'visaPassportRef', 'flightDetails',
+          'accommodationDetails', 'notes', 'ownerId', 'createdAt', 'updatedAt'
+        ]) &&
+        data.patientId is string && data.patientId.size() <= 128 &&
+        data.patientName is string && data.patientName.size() <= 140 &&
+        data.serviceCategory is string && data.serviceCategory.size() <= 80 &&
+        data.serviceName is string && data.serviceName.size() <= 160 &&
+        data.hospitalOrProvider is string && data.hospitalOrProvider.size() <= 160 &&
+        isOptStr(data, 'doctorName', 140) &&
+        data.scheduledDate is string && data.scheduledDate.size() <= 40 &&
+        isOptStr(data, 'scheduledTime', 40) &&
+        isOptNum(data, 'serviceFeeUsd') &&
+        isOptStr(data, 'processingTimeEstimate', 100) &&
+        data.status is string && data.status.size() <= 60 &&
+        data.assignedCoordinatorName is string && data.assignedCoordinatorName.size() <= 120 &&
+        isOptStr(data, 'visaPassportRef', 120) &&
+        isOptStr(data, 'flightDetails', 300) &&
+        isOptStr(data, 'accommodationDetails', 300) &&
+        isOptStr(data, 'notes', 1500) &&
+        data.ownerId is string && data.ownerId.size() <= 128 &&
+        data.createdAt is string && data.createdAt.size() <= 50 &&
+        data.updatedAt is string && data.updatedAt.size() <= 50;
+    }
+
+    match /serviceBookings/{bookingId} {
+      allow get: if isSignedIn() && isValidId(bookingId) && (resource.data.ownerId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+      allow create: if isVerifiedUser() && isValidId(bookingId) && isValidServiceBooking(incoming()) &&
+        incoming().ownerId == request.auth.uid;
+      allow update: if isVerifiedUser() && isValidId(bookingId) && isValidServiceBooking(incoming()) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt && (
+          isAdmin() ||
+          (existing().ownerId == request.auth.uid &&
+           incoming().diff(existing()).affectedKeys().hasOnly([
+             'scheduledDate', 'scheduledTime', 'status', 'assignedCoordinatorName',
+             'visaPassportRef', 'flightDetails', 'accommodationDetails', 'notes', 'updatedAt'
+           ]))
+        );
+      allow delete: if isAdmin() && isValidId(bookingId);
+    }
+
+    // 10. FollowUpTask Validation
+    function isValidFollowUpTask(data) {
+      return data.keys().hasAll([
+          'title', 'relatedType', 'relatedId', 'relatedName',
+          'assignedToName', 'priority', 'dueDate', 'status',
+          'ownerId', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'title', 'description', 'relatedType', 'relatedId', 'relatedName',
+          'assignedToName', 'priority', 'dueDate', 'reminderTime', 'status',
+          'automationTrigger', 'escalationRule', 'internalNotes',
+          'ownerId', 'createdAt', 'updatedAt'
+        ]) &&
+        data.title is string && data.title.size() <= 200 &&
+        isOptStr(data, 'description', 1000) &&
+        data.relatedType is string && data.relatedType.size() <= 50 &&
+        data.relatedId is string && data.relatedId.size() <= 128 &&
+        data.relatedName is string && data.relatedName.size() <= 140 &&
+        data.assignedToName is string && data.assignedToName.size() <= 120 &&
+        data.priority is string && data.priority in ['Urgent', 'High', 'Medium', 'Low'] &&
+        data.dueDate is string && data.dueDate.size() <= 40 &&
+        isOptStr(data, 'reminderTime', 40) &&
+        data.status is string && data.status in ['Pending', 'In Progress', 'Overdue', 'Completed'] &&
+        isOptStr(data, 'automationTrigger', 160) &&
+        isOptStr(data, 'escalationRule', 200) &&
+        isOptStr(data, 'internalNotes', 1000) &&
+        data.ownerId is string && data.ownerId.size() <= 128 &&
+        data.createdAt is string && data.createdAt.size() <= 50 &&
+        data.updatedAt is string && data.updatedAt.size() <= 50;
+    }
+
+    match /tasks/{taskId} {
+      allow get: if isSignedIn() && isValidId(taskId) && (resource.data.ownerId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+      allow create: if isVerifiedUser() && isValidId(taskId) && isValidFollowUpTask(incoming()) &&
+        incoming().ownerId == request.auth.uid;
+      allow update: if isVerifiedUser() && isValidId(taskId) && isValidFollowUpTask(incoming()) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt && (
+          isAdmin() ||
+          (existing().ownerId == request.auth.uid &&
+           incoming().diff(existing()).affectedKeys().hasOnly([
+             'title', 'description', 'assignedToName', 'priority', 'dueDate',
+             'reminderTime', 'status', 'internalNotes', 'updatedAt'
+           ]))
+        );
+      allow delete: if isVerifiedUser() && isValidId(taskId) && (resource.data.ownerId == request.auth.uid || isAdmin());
+    }
+
+    // 11. CommunicationRecord Validation
+    function isValidCommunicationRecord(data) {
+      return data.keys().hasAll([
+          'recipientType', 'recipientId', 'recipientName', 'channel',
+          'direction', 'messageSummary', 'staffOrAutomationName',
+          'deliveryStatus', 'consentVerified', 'optOutStatus',
+          'ownerId', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'recipientType', 'recipientId', 'recipientName', 'channel',
+          'direction', 'subject', 'messageSummary', 'staffOrAutomationName',
+          'deliveryStatus', 'consentVerified', 'optOutStatus',
+          'ownerId', 'createdAt', 'updatedAt'
+        ]) &&
+        data.recipientType is string && data.recipientType.size() <= 40 &&
+        data.recipientId is string && data.recipientId.size() <= 128 &&
+        data.recipientName is string && data.recipientName.size() <= 140 &&
+        data.channel is string && data.channel.size() <= 60 &&
+        data.direction is string && data.direction in ['Inbound', 'Outbound'] &&
+        isOptStr(data, 'subject', 200) &&
+        data.messageSummary is string && data.messageSummary.size() <= 2000 &&
+        data.staffOrAutomationName is string && data.staffOrAutomationName.size() <= 120 &&
+        data.deliveryStatus is string && data.deliveryStatus.size() <= 60 &&
+        data.consentVerified is bool &&
+        data.optOutStatus is bool &&
+        data.ownerId is string && data.ownerId.size() <= 128 &&
+        data.createdAt is string && data.createdAt.size() <= 50 &&
+        data.updatedAt is string && data.updatedAt.size() <= 50;
+    }
+
+    match /communications/{commId} {
+      allow get: if isSignedIn() && isValidId(commId) && (resource.data.ownerId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+      allow create: if isVerifiedUser() && isValidId(commId) && isValidCommunicationRecord(incoming()) &&
+        incoming().ownerId == request.auth.uid;
+      allow update: if isVerifiedUser() && isValidId(commId) && isValidCommunicationRecord(incoming()) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt && (
+          isAdmin() ||
+          (existing().ownerId == request.auth.uid &&
+           incoming().diff(existing()).affectedKeys().hasOnly([
+             'deliveryStatus', 'consentVerified', 'optOutStatus', 'updatedAt'
+           ]))
+        );
+      allow delete: if isAdmin() && isValidId(commId);
+    }
+
+    // 12. HospitalDirectoryEntry Validation
+    function isValidHospitalDirectoryEntry(data) {
+      return data.keys().hasAll([
+          'name', 'city', 'country', 'accreditation', 'keySpecialties',
+          'leadDoctors', 'internationalDeskContact', 'averageOpinionTurnaroundHours',
+          'verifiedPartner', 'ownerId', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'name', 'city', 'country', 'accreditation', 'keySpecialties',
+          'leadDoctors', 'internationalDeskContact', 'averageOpinionTurnaroundHours',
+          'verifiedPartner', 'notes', 'ownerId', 'createdAt', 'updatedAt'
+        ]) &&
+        data.name is string && data.name.size() <= 160 &&
+        data.city is string && data.city.size() <= 80 &&
+        data.country is string && data.country.size() <= 80 &&
+        data.accreditation is string && data.accreditation.size() <= 120 &&
+        data.keySpecialties is string && data.keySpecialties.size() <= 500 &&
+        data.leadDoctors is string && data.leadDoctors.size() <= 800 &&
+        data.internationalDeskContact is string && data.internationalDeskContact.size() <= 200 &&
+        (data.averageOpinionTurnaroundHours is int || data.averageOpinionTurnaroundHours is float) &&
+        data.verifiedPartner is bool &&
+        isOptStr(data, 'notes', 1000) &&
+        data.ownerId is string && data.ownerId.size() <= 128 &&
+        data.createdAt is string && data.createdAt.size() <= 50 &&
+        data.updatedAt is string && data.updatedAt.size() <= 50;
+    }
+
+    match /hospitals/{hospitalId} {
+      allow get: if isSignedIn() && isValidId(hospitalId);
+      allow list: if isSignedIn() && (resource.data.verifiedPartner == true || resource.data.ownerId == request.auth.uid || isAdmin());
+      allow create: if isVerifiedUser() && isValidId(hospitalId) && isValidHospitalDirectoryEntry(incoming()) &&
+        incoming().ownerId == request.auth.uid;
+      allow update: if isVerifiedUser() && isValidId(hospitalId) && isValidHospitalDirectoryEntry(incoming()) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt && (
+          isAdmin() ||
+          (existing().ownerId == request.auth.uid &&
+           incoming().diff(existing()).affectedKeys().hasOnly([
+             'accreditation', 'keySpecialties', 'leadDoctors',
+             'internationalDeskContact', 'averageOpinionTurnaroundHours',
+             'verifiedPartner', 'notes', 'updatedAt'
+           ]))
+        );
+      allow delete: if isAdmin() && isValidId(hospitalId);
+    }
+
+    // 13. AuditLogEntry Validation
+    function isValidAuditLogEntry(data) {
+      return data.keys().hasAll([
+          'actorUid', 'actorName', 'actorRole', 'action',
+          'module', 'targetId', 'targetName', 'details', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'actorUid', 'actorName', 'actorRole', 'action',
+          'module', 'targetId', 'targetName', 'details', 'createdAt'
+        ]) &&
+        data.actorUid is string && data.actorUid.size() <= 128 &&
+        data.actorName is string && data.actorName.size() <= 120 &&
+        data.actorRole is string && data.actorRole.size() <= 80 &&
+        data.action is string && data.action.size() <= 160 &&
+        data.module is string && data.module.size() <= 80 &&
+        data.targetId is string && data.targetId.size() <= 128 &&
+        data.targetName is string && data.targetName.size() <= 160 &&
+        data.details is string && data.details.size() <= 1000 &&
+        data.createdAt is string && data.createdAt.size() <= 50;
+    }
+
+    match /auditLogs/{logId} {
+      allow get: if isSignedIn() && isValidId(logId) && (resource.data.actorUid == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.actorUid == request.auth.uid || isAdmin());
+      allow create: if isVerifiedUser() && isValidId(logId) && isValidAuditLogEntry(incoming()) &&
+        incoming().actorUid == request.auth.uid;
+      allow update, delete: if false;
+    }
+  }
+}

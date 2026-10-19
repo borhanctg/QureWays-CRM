@@ -1,0 +1,6 @@
+{
+  "name": "QureWays Trip Medical Tourism CRM",
+  "description": "AI-powered medical tourism and international patient coordination CRM for QureWays Trip, managing patient journeys from Bangladesh to Apollo Hospitals, Chennai and international centers.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
